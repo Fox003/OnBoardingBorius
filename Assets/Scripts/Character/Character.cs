@@ -19,7 +19,10 @@ class Character : MonoBehaviour
     
     [Header("Other")] 
     public bool movementEnabled = true;
-    public float gravityForce = 2f;
+
+    public float HitStopDuration = 1.0f;
+    public float knockBackDamping = 5f;
+    //public float gravityForce = 2f;
 }
 
 class CharacterBaker : Baker<Character>
@@ -39,9 +42,26 @@ class CharacterBaker : Baker<Character>
             dashDuration = authoring.dashDuration,
             dashTimer = authoring.dashDuration,
             movementEnabled = authoring.movementEnabled,
+            knockbackDamping = authoring.knockBackDamping,
+            isInKnockback = false,
         });
         
         AddComponent(entity, new InputsData
+        {
+            
+        });
+        
+        AddComponent(entity, new PlayerInputComponent
+        {
+            DeviceID = 0,
+        });
+        
+        AddComponent(entity, new InvincibilityData
+        {
+            Timer = 0
+        });
+        
+        AddComponent(entity, new PendingKnockbackData
         {
             
         });

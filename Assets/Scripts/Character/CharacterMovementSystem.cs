@@ -7,6 +7,8 @@ using Unity.Physics;
 using Unity.Physics.Extensions;
 using Unity.Physics.Systems;
 using Unity.Transforms;
+using UnityEngine;
+using RaycastHit = Unity.Physics.RaycastHit;
 
 [UpdateInGroup(typeof(FixedStepSimulationSystemGroup))]
 [UpdateAfter(typeof(PhysicsSystemGroup))]
@@ -28,7 +30,7 @@ partial struct CharacterMovementSystem : ISystem
                      .Query<RefRW<CharacterData>, RefRO<InputsData>, RefRW<PhysicsVelocity>, RefRO<PhysicsMass>, RefRW<LocalTransform>>())
         {
             // Si on a pas le droit de bouger, on bouge pas
-            if (!characterData.ValueRO.movementEnabled) 
+            if (!characterData.ValueRO.movementEnabled)
                 continue;
             
             var physicsWorld = SystemAPI.GetSingleton<PhysicsWorldSingleton>();
@@ -36,7 +38,7 @@ partial struct CharacterMovementSystem : ISystem
             
             var vel = physicsVelocity.ValueRW;
             
-            characterData.ValueRW.currentSpeed = characterData.ValueRO.isDashing
+            characterData.ValueRW.desiredSpeed = characterData.ValueRO.isDashing
                 ? characterData.ValueRO.dashSpeed
                 : characterData.ValueRO.maxSpeed;
             
@@ -48,19 +50,28 @@ partial struct CharacterMovementSystem : ISystem
             vel.Linear += new float3(inputs.ValueRO.Move.x, 0, inputs.ValueRO.Move.y) * characterData.ValueRO.acceleration * deltaTime;
             
             // Controle de la vitesse
-            var flatVel = new float3(vel.Linear.x, 0, vel.Linear.z);
-            if (math.length(flatVel) > characterData.ValueRO.currentSpeed)
+            float3 flatVel = new float3(vel.Linear.x, 0, vel.Linear.z);
+            float flatSpeed = math.length(flatVel);
+
+            if (flatSpeed > characterData.ValueRO.desiredSpeed)
             {
-                var limitedVel = math.normalize(flatVel) *  characterData.ValueRO.currentSpeed;
-                vel.Linear = new float3(limitedVel.x, vel.Linear.y, limitedVel.z);
+                // DAMPING PROGRESSIF pendant le knockback
+                float3 slowDir = -math.normalize(flatVel);
+                float excessSpeed = flatSpeed - characterData.ValueRO.desiredSpeed;
+
+                float damping = characterData.ValueRO.knockbackDamping; // ex: 5.0f
+                float3 brake = slowDir * excessSpeed * damping * deltaTime;
+
+                vel.Linear += new float3(brake.x, 0, brake.z);
             }
             
             // Friction
-            if (!isMoving && math.length(flatVel) > 0.001f)
+            if (math.length(flatVel) > 0.001f)
             {
                 var frictionVel = new float3(vel.Linear.x, 0, vel.Linear.z) * characterData.ValueRO.deceleration;
                 vel.Linear -= new float3(frictionVel.x, vel.Linear.y, frictionVel.z) * deltaTime;
             }
+            
             
             // Dash
             if (inputs.ValueRO.Dash && characterData.ValueRW.isDashing == false)
@@ -68,7 +79,7 @@ partial struct CharacterMovementSystem : ISystem
                 // Si on veut aller dans une direction
                 if (math.length(inputs.ValueRO.Move) > 0)
                 {
-                    characterData.ValueRW.currentSpeed = characterData.ValueRO.dashSpeed;
+                    characterData.ValueRW.desiredSpeed = characterData.ValueRO.dashSpeed;
                     characterData.ValueRW.isDashing = true;
                     var dashForce = new float3(inputs.ValueRO.Move.x, 0, inputs.ValueRO.Move.y) * characterData.ValueRO.dashForce;
                     vel.ApplyLinearImpulse(mass, dashForce);

@@ -1,6 +1,7 @@
 using Unity.Burst;
 using Unity.Entities;
 using Unity.Mathematics;
+using UnityEngine.InputSystem;
 using Vector2 = UnityEngine.Vector2;
 
 public partial class InputsSystem : SystemBase
@@ -16,12 +17,19 @@ public partial class InputsSystem : SystemBase
     
     protected override void  OnUpdate()
     {
-        foreach (RefRW<InputsData> data in SystemAPI.Query<RefRW<InputsData>>())
+        foreach (var (inputData, playerInput) in SystemAPI.Query<RefRW<InputsData>, RefRO<PlayerInputComponent>>())
         {
-            data.ValueRW.Move = _inputs.Player.Move.ReadValue<Vector2>();
-            data.ValueRW.Jump = _inputs.Player.Jump.ReadValue<float>() > 0.5f;
-            data.ValueRW.Dash = _inputs.Player.Attack.ReadValue<float>() > 0.5f;
-            data.ValueRW.Dodge = _inputs.Player.Interact.ReadValue<float>() > 0.5f;
+            int deviceID = playerInput.ValueRO.DeviceID;
+
+            if (!PlayerInputRegistry.Wrappers.TryGetValue(deviceID, out var wrapper))
+                continue;
+
+            var actions = wrapper.Actions.Player;
+
+            inputData.ValueRW.Move  = actions.Move.ReadValue<Vector2>();
+            inputData.ValueRW.Jump  = actions.Jump.ReadValue<float>() > 0.5f;
+            inputData.ValueRW.Dash  = actions.Attack.ReadValue<float>() > 0.5f;
+            inputData.ValueRW.Dodge = actions.Interact.ReadValue<float>() > 0.5f;
         }
     }
 }

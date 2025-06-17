@@ -9,32 +9,27 @@ using UnityEngine;
 
 [UpdateInGroup(typeof(FixedStepSimulationSystemGroup))]
 [UpdateAfter(typeof(PhysicsSystemGroup))]
-public partial class PlayerCollisionSystem : SystemBase
+partial struct PlayerCollisionSystem : ISystem
 {
-    private EntityCommandBufferSystem _ecbSystem;
     
-    protected override void OnCreate()
+    public void OnCreate(ref SystemState state)
     {
-        _ecbSystem = World.GetOrCreateSystemManaged<EndSimulationEntityCommandBufferSystem>();
+        state.RequireForUpdate<SimulationSingleton>();
     }
     
     
-    protected override void OnUpdate()
+    public void OnUpdate(ref SystemState state)
     {
         var collisionWorld = SystemAPI.GetSingleton<SimulationSingleton>();
-        var ecb = _ecbSystem.CreateCommandBuffer().AsParallelWriter();
 
-        var job = new DashCollisionJob
+        state.Dependency = new DashCollisionJob
         {
             CharacterDataLookup = SystemAPI.GetComponentLookup<CharacterData>(false),
             PhysicsVelocityLookup = SystemAPI.GetComponentLookup<PhysicsVelocity>(false),
             InvincibilityDataLookup = SystemAPI.GetComponentLookup<InvincibilityData>(false),
+            PendingKnockbackDataLookup = SystemAPI.GetComponentLookup<PendingKnockbackData>(false),
             PhysicsMassLookup = SystemAPI.GetComponentLookup<PhysicsMass>(true),
-            CommandBuffer = ecb
-        };
-
-        Dependency = job.Schedule(collisionWorld, Dependency);
-        _ecbSystem.AddJobHandleForProducer(Dependency);
+        }.Schedule(collisionWorld, state.Dependency);
     }
 
     public struct DashCollisionJob : ICollisionEventsJob
@@ -43,7 +38,7 @@ public partial class PlayerCollisionSystem : SystemBase
         public ComponentLookup<CharacterData> CharacterDataLookup;
         public ComponentLookup<PhysicsVelocity> PhysicsVelocityLookup;
         public ComponentLookup<InvincibilityData> InvincibilityDataLookup;
-        public EntityCommandBuffer.ParallelWriter CommandBuffer;
+        public ComponentLookup<PendingKnockbackData> PendingKnockbackDataLookup;
         [ReadOnly] public ComponentLookup<PhysicsMass> PhysicsMassLookup;
 
         public void Execute(CollisionEvent collisionEvent)
@@ -54,21 +49,31 @@ public partial class PlayerCollisionSystem : SystemBase
             // Only process once per pair
             if (a.Index > b.Index)
             {
-                Debug.Log("index of collider a was greater than b");
                 return;
             }
-
-            bool aHasData = CharacterDataLookup.HasComponent(a);
-            bool bHasData = CharacterDataLookup.HasComponent(b);
+            
+            bool aHasVelocityComponent = PhysicsVelocityLookup.HasComponent(a);
+            bool bHasVelocityComponent = PhysicsVelocityLookup.HasComponent(b);
+            
+            bool aHasMassComponent = PhysicsMassLookup.HasComponent(a);
+            bool bHasMassComponent = PhysicsMassLookup.HasComponent(b);
+            
+            bool aHasCharacterComponent = CharacterDataLookup.HasComponent(a);
+            bool bHasCharacterComponent = CharacterDataLookup.HasComponent(b);
             
             // Si l'entite a ou b n'a pas une des composantes qu'on doit access, return
-            if (!aHasData || !bHasData) return;
+            if (!aHasVelocityComponent || !bHasVelocityComponent ||
+                !aHasMassComponent || !bHasMassComponent ||
+                !aHasCharacterComponent || !bHasCharacterComponent)
+            {
+                return;
+            }
 
             var aData = CharacterDataLookup[a];
             var bData = CharacterDataLookup[b];
             
-            var aIsInvincible = InvincibilityDataLookup.HasComponent(a);
-            var bIsInvincible = InvincibilityDataLookup.HasComponent(b);
+            var aIsInvincible = InvincibilityDataLookup.IsComponentEnabled(a);
+            var bIsInvincible = InvincibilityDataLookup.IsComponentEnabled(b);
         
             // Si une des deux entite est invincible, return
             if (aIsInvincible || bIsInvincible)
@@ -79,18 +84,21 @@ public partial class PlayerCollisionSystem : SystemBase
             
             bool aIsDashing = aData.isDashing;
             bool bIsDashing = bData.isDashing;
-            
+
+            float hitLagDuration = 0.2f;
             if (aIsDashing && !bIsDashing)
             {
                 KillMomentum(a, b);
-                AddPendingKnockback(a, b, collisionEvent, CommandBuffer);
+                AddPendingKnockback(a, b, collisionEvent, hitLagDuration, PendingKnockbackDataLookup);
+                EnableInvincibility(b, 0.6f, InvincibilityDataLookup);
                 
                 Debug.Log("B got rocked");
             }
             else if (bIsDashing && !aIsDashing)
             {
                 KillMomentum(a, b);
-                AddPendingKnockback(b, a, collisionEvent, CommandBuffer);
+                AddPendingKnockback(b, a, collisionEvent, hitLagDuration, PendingKnockbackDataLookup);
+                EnableInvincibility(a, 0.6f, InvincibilityDataLookup);
                 
                 Debug.Log("A got rocked");
             }
@@ -102,40 +110,56 @@ public partial class PlayerCollisionSystem : SystemBase
             }
         }
 
-        void AddInvincibility(Entity entity, EntityCommandBuffer.ParallelWriter ecb)
+        void EnableInvincibility(Entity entity, float invincivilityDuration, ComponentLookup<InvincibilityData> invincibilityDataLookup)
         {
-            ecb.AddComponent(0, entity, new InvincibilityData
+            invincibilityDataLookup[entity] = new InvincibilityData
             {
-                Timer = 0.2f,
-            });
+                Timer = invincivilityDuration
+            };
+            
+            invincibilityDataLookup.SetComponentEnabled(entity, true);
         }
 
-        void AddPendingKnockback(Entity dasher, Entity target, CollisionEvent collisionEvent, EntityCommandBuffer.ParallelWriter ecb)
+        void AddPendingKnockback(Entity dasher, Entity target, CollisionEvent collisionEvent, float HitLagDuration, ComponentLookup<PendingKnockbackData> pendingKnockbackLookup)
         {
             // Cache the pending knockback by adding a pending knockback component to the target and dasher
             // One will get the knockback force and the other the pushback
             if (!PhysicsVelocityLookup.HasComponent(target) || !PhysicsMassLookup.HasComponent(target)) return;
             
-            var knockbackDir = math.normalizesafe(collisionEvent.Normal);
+            var normal = collisionEvent.Normal;
+            
+            if (collisionEvent.EntityA == dasher)
+            {
+                // Normal goes from B -> A, so we flip it to go from A -> B
+                normal = -math.normalizesafe(normal);
+            }
+            else if (collisionEvent.EntityB == dasher)
+            {
+                // Normal is already in the right direction
+                normal = math.normalizesafe(normal);
+            }
 
-            float knockbackForce = 80f; // tweak as needed
-            float pushBackForce = -15f;
-            float3 targetKnockback = knockbackDir * knockbackForce;
-            float3 dasherKnockback = knockbackDir * pushBackForce;
+            float knockbackForce = 6f; // tweak as needed
+            float pushBackForce = 2.5f;
+            float3 targetKnockback = normal * knockbackForce;
+            float3 dasherKnockback = -normal * pushBackForce;
             
-            ecb.AddComponent(0, target, new PendingKnockbackData
+            pendingKnockbackLookup[dasher] = new PendingKnockbackData
             {
-                KnockbackDirection = knockbackDir,
-                KnockbackForce = knockbackForce,
-                Timer = 3f,
-            });
-            
-            ecb.AddComponent(0, dasher, new PendingKnockbackData
-            {
-                KnockbackDirection = knockbackDir,
+                KnockbackDirection = dasherKnockback,
                 KnockbackForce = pushBackForce,
-                Timer = 3f,
-            });
+                Timer = HitLagDuration
+            };
+            
+            pendingKnockbackLookup[target] = new PendingKnockbackData
+            {
+                KnockbackDirection = targetKnockback,
+                KnockbackForce = knockbackForce,
+                Timer = HitLagDuration
+            };
+            
+            pendingKnockbackLookup.SetComponentEnabled(target, true);
+            pendingKnockbackLookup.SetComponentEnabled(dasher, true);
         }
 
         void KillMomentum(Entity a, Entity b)
